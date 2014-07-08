@@ -1,4 +1,4 @@
 qualysguard_host_list_detection
 ===============================
 
-Multithreaded example for host list detection.
+Multithreaded proof of concept for efficiently downloading via the host list detection.
