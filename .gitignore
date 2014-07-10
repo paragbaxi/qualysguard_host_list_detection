@@ -34,3 +34,13 @@ nosetests.xml
 .mr.developer.cfg
 .project
 .pydevproject
+
+# test data
+data/
+log/
+config.ini
+.csv
+.xml
+
+# PyCharm
+.idea
