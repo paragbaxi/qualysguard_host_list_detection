@@ -46,8 +46,8 @@ def download_hosts(i, q):
             except ValueError, e:
                 # Only one host_id, no comma found.
                 ids_range = ids
-        logger.info('Thread %s: Downloading hosts' % (thread_number))
-        logger.debug('Thread %s: Downloading: %s' % (thread_number, ids))
+        logger.info('Thread %s: Downloading new hosts.' % (thread_number))
+        logger.debug('Thread %s: Downloading new hosts: %s' % (thread_number, ids))
         # Set parameters.
         params = {'action': 'list',
                   'ids': ids,
@@ -66,9 +66,11 @@ def download_hosts(i, q):
         if c_args.format == 'XML':
             file_extension = 'xml'
         filename = '%s/%s-host_ids-%s.%s' % (PATH_DATA, datetime_format, ids_range, file_extension)
+        logger.debug('Writing hosts file: %s' % filename)
         with open(filename, 'w') as host_file:
             print(response, file = host_file)
         q.task_done()
+        logger.debug('Thread %s: Finished downloading.: %s' % (thread_number, ids))
 
 def save_config():
     """
