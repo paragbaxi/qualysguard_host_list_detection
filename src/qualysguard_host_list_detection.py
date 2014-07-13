@@ -27,17 +27,30 @@ def download_hosts(i, q):
     the main thread ends.
     """
     global c_args, datetime_format, PATH_DATA
-    number_of_hosts = c_args.host_id_download_truncation_limit
+    # Have thread number start at 1 for human display.
+    thread_number = i + 1
+    # Download assigned hosts in this thread.
     while True:
-        print('%s: Looking for the next enclosure' % i)
-        thread_start = q.get()
-        print('%s: Downloading:' % i, thread_start)
-        # Find end host id.
-        thread_end = thread_start+(number_of_hosts-1)
+        logger.debug('Thread %s: Looking for the next enclosure' % (thread_number))
+        ids = q.get()
+        # Chunk received.
+        # Find start & end host ids for logging.
+        if not ',' in ids:
+            # Only one host_id or one range, no comma found.
+            ids_range = ids
+        else:
+            try:
+                thread_start = ids[:ids.index(',')]
+                thread_end = ids[ids.rindex(',')+1:]
+                ids_range = '%s-%s' % (thread_start, thread_end)
+            except ValueError, e:
+                # Only one host_id, no comma found.
+                ids_range = ids
+        logger.info('Thread %s: Downloading hosts' % (thread_number))
+        logger.debug('Thread %s: Downloading: %s' % (thread_number, ids))
         # Set parameters.
         params = {'action': 'list',
-                  'id_min': str(thread_start),
-                  'id_max': str(thread_end),
+                  'ids': ids,
                   'output_format': c_args.format,}
         # Suppress duplicate data for CSV format.
         if 'CSV' in params['output_format']:
@@ -52,7 +65,7 @@ def download_hosts(i, q):
         file_extension = 'csv'
         if c_args.format == 'XML':
             file_extension = 'xml'
-        filename = '%s/%s-%s-%s.%s' % (PATH_DATA, datetime_format, thread_start, thread_end, file_extension)
+        filename = '%s/%s-host_ids-%s.%s' % (PATH_DATA, datetime_format, ids_range, file_extension)
         with open(filename, 'w') as host_file:
             print(response, file = host_file)
         q.task_done()
@@ -61,7 +74,7 @@ def save_config():
     """
     :return: Completed save.
     """
-    global host_id_start, host_id_end
+    global host_id_start
     # Save start and end to file.
     cfgfile = open("config.ini",'w')
     try:
@@ -70,7 +83,6 @@ def save_config():
         # File already exists.
         pass
     Config.set('Host ID','start',host_id_start)
-    Config.set('Host ID','end',host_id_end)
     Config.write(cfgfile)
     cfgfile.close()
     return True
@@ -92,54 +104,87 @@ def find_start_host_id(id_start):
     host_id_start = id_start = host_list_output.RESPONSE.ID_SET.ID.text
     return host_id_start
 
-def find_end_host_id(id_start, host_id_truncation_limit):
+def ids_in_id_list(tree):
+    """Return set of extracted IPs from IP list XML.
+    """
+    ids = []
+    # Grab all IDs and ID ranges.
+    id_list = tree.xpath('//ID_SET/descendant::*/text()')
+    for i in id_list:
+        logger.debug('ID: %s' % i)
+        if '-' in i:
+            id_start = i[:i.find('-')]
+            id_end = i[i.find('-')+1:]
+            ids += range(int(id_start),int(id_end)+1)
+        else:
+            ids += [int(i)]
+    return ids
+
+def chunk_to_parameter(chunk):
+    """
+    :param chunk: List of numbers.
+    :return: String of numbers, comma delimited, no spaces.
+    """
+    numbers = ''
+    for number in chunk:
+        numbers += '%s,' % number
+    # Remove last comma.
+    numbers = numbers[:-1]
+    return numbers
+
+def add_work_and_find_end_host_id(id_start, num_hosts_per_call):
     """
     :param id_start: Host ID to start querying.
-    :param host_id_truncation_limit: Number of hosts to query per call.
+    :param num_hosts_per_call: Number of hosts to query per call.
     :return: Last host ID.
     """
+    global hosts_queue, logger, num_hosts
+    chunk = []
     while True:
         id_start += 1
-        logger.info('Calling host API.')
+        logger.debug('Calling host API to identify host ids.')
         tree = qgc.request('/api/2.0/fo/asset/host/',
-            {'action': 'list',
-             'id_min': str(id_start),
-             'details': 'None',
-             'truncation_limit': host_id_truncation_limit,})
-        # Objectify.
-        tree = etree.fromstring(tree)
-        # Find last ID.
-        expr = '(//ID)[last()]'
-        try:
-            last_id = int(tree.xpath(expr)[0].text)
-        except IndexError, e:
-            # No ID tag.
-            logger.info('No ID tag.')
-            last_id = 0
-        # Find last ending range.
-        expr = '(//ID_RANGE)[last()]'
-        try:
-            last_id_range = tree.xpath(expr)[0].text
-            ending_range = int(last_id_range.split('-')[1])
-        except IndexError, e:
-            # No ID_RANGE tag.
-            logger.info('No ID_RANGE tag.')
-            ending_range = 0
-        if (not last_id) and (not ending_range):
-            # No more hosts.
-            logger.info('No more hosts.')
+                           {'action': 'list',
+                            'id_min': str(id_start),
+                            'details': 'None',
+                            'truncation_limit': num_hosts_per_call,})
+        # Extract host ids.
+        ids = ids_in_id_list(etree.fromstring(tree))
+        # Add length to total number of hosts.
+        num_hosts += len(ids)
+        logger.info('Found %s id(s), will now queue.' % str(len(ids)))
+        logger.debug('ids found: %s' % str(ids))
+        # Are there any more hosts?
+        if not ids:
+            # No more new hosts.
+            logger.info('No more new hosts.')
+            # Is the current chunk incomplete?
+            if chunk:
+                # Send it to work queue.
+                # Add work to the queue.
+                logger.debug('Queuing remaining id(s): %s' % str(chunk))
+                hosts_queue.put(chunk_to_parameter(chunk))
             break
-        # Find last host id, set to new start host id.
-        id_start = max(last_id, ending_range)
+        # For next round, find last host id, set to new start host id.
+        id_start = ids[len(ids)-1]
+        # Add hosts to work queue by popping until chunks are full.
+        # Popping removes from end, so reverse to maintain order.
+        ids.reverse()
+        # Work until ids is empty.
+        while ids:
+            # Add to chunk.
+            chunk.append(ids.pop())
+            logger.debug('id added: %s' % str(chunk[-1]))
+            # Is chunk is full?
+            if len(chunk) == c_args.hosts_to_download_per_call:
+                # Add work to the queue.
+                logger.debug('Queuing: %s' % str(chunk))
+                hosts_queue.put(chunk_to_parameter(chunk))
+                # Reset chunk.
+                chunk = []
+    # Return last host, which was saved in id_start from while loop.
+        logger.debug('Done processing up to host id: %s' % str(id_start))
     return id_start
-
-def qualys_api(url, parameters):
-    """
-    :param hosts: Hosts to download.
-    :return: Hosts' data.
-    """
-    response = qualysapi.request(url, parameters)
-    return objectify.parse(response).getroot()
 
 #
 #  Begin
@@ -157,10 +202,10 @@ parser.add_argument('-f', '--format',
                     help='Set host list detection output format (Default = CSV_NO_METADATA)')
 parser.add_argument('--host_id_discovery_truncation_limit',
                      default=5000,
-                     help='Override default truncation limit (5000) For host ID discovery.')
-parser.add_argument('--host_id_download_truncation_limit',
-                     default=5000,
-                     help='Override default truncation limit (5000) For host ID discovery.')
+                     help='Override default truncation limit (5000) for host ID discovery.')
+parser.add_argument('--hosts_to_download_per_call',
+                     default=1000,
+                     help='Override default number of hosts (1000) to download per call for host vulnerability data.')
 parser.add_argument('-o', '--options',
                     help='Set host list detection options (Default: {\'suppress_duplicated_data_from_csv\': \'1\'})\n(Example: \"{\'include_search_list_titles\': \'SSL+certificate\', \'active_kernels_only\': \'1\'}\")')
 parser.add_argument('-t', '--threads',
@@ -171,6 +216,7 @@ parser.add_argument('-v', '--verbose',
                     help='Outputs additional information to log.')
 # Parse arguments.
 c_args = parser.parse_args()
+c_args.hosts_to_download_per_call = int(c_args.hosts_to_download_per_call)
 # Create log and data directories.
 PATH_LOG = 'log'
 if not os.path.exists(PATH_LOG):
@@ -189,16 +235,19 @@ if c_args.verbose:
     logger.setLevel(logging.DEBUG)
 else:
     logger.setLevel(logging.INFO)
+    logging.getLogger('qualysapi').setLevel(logging.ERROR)
+    logging.getLogger('requests').setLevel(logging.ERROR)
 # This handler writes everything to a file.
 logger_file = logging.FileHandler(LOG_FILENAME)
 logger_file.setFormatter(logging.Formatter("%(asctime)s %(name)-12s %(levelname)s %(funcName)s %(lineno)d %(message)s"))
-logger_file.setLevel(logging.INFO)
 # This handler prints to screen.
 logger_console = logging.StreamHandler(sys.stdout)
-logger_console.setLevel(logging.ERROR)
 if c_args.verbose:
     logger_file.setLevel(logging.DEBUG)
     logger_console.setLevel(logging.DEBUG)
+else:
+    logger_file.setLevel(logging.INFO)
+    logger_console.setLevel(logging.ERROR)
 logger.addHandler(logger_file)
 logger.addHandler(logger_console)
 # Configure Qualys API connector.
@@ -211,65 +260,37 @@ Config = ConfigParser.ConfigParser()
 Config.read('config.ini')
 try:
     host_id_start = Config.getint('Host ID', 'start')
-    logger.info('Read host_id_start from config file: %s' % str(host_id_start))
-    host_id_end = Config.getint('Host ID', 'end')
-    logger.info('Read host_id_end from config file: %s' % str(host_id_end))
+    logger.debug('Read host_id_start from config file: %s' % str(host_id_start))
 except ConfigParser.NoSectionError, e:
     # Discover start host_id, minimum is 1.
     host_id_start = 1
 # Confirm start id. May be pushed back due to purging.
 host_id_start = int(find_start_host_id(host_id_start))
-logger.info(host_id_start)
-# Find ending host_id.
-start_id = host_id_start
-# Resume if possible.
-try:
-    start_id = host_id_end
-except NameError, e:
-    # No previous data. Start from first host id.
-    start_id = host_id_start
-host_id_end = find_end_host_id(start_id, c_args.host_id_discovery_truncation_limit)
-logger.info(host_id_end)
-# Save configuration
-save_config()
-# Download in increments of 1,000 host IDs, not 1,000 hosts.
-# For example, from 1000 to 10000:
-# 1000-1999
-# 2000-2999
-# 3000-3999
-# ...
-# 9000-9999
-# 10000-10999
-
+logger.debug('New host_id_start: %s' % host_id_start)
+# Keep track of number of hosts.
+num_hosts = 0
+# Set up multi-threading.
 # Number of threads.
 threads = int(c_args.threads)
 # Set up some global variables
 hosts_queue = Queue()
-# Requests will be chunked into 1,000 hosts request.
-chunks = []
-# Chunk.
-start_of_chunk = host_id_start
-while start_of_chunk <= host_id_end:
-    chunks.append(start_of_chunk)
-    start_of_chunk += 1000
-# Add ending chunk.
-chunks.append(start_of_chunk )
 # Set up some threads to fetch the enclosures
 for i in range(threads):
     worker = Thread(target=download_hosts, args=(i, hosts_queue,))
     worker.setDaemon(True)
     worker.start()
-# Download the feed(s) and put the enclosure URLs into
-# the queue.
-for chunk in chunks:
-    logger.debug('Queuing: %s' % str(chunk))
-    hosts_queue.put(chunk)
-
+# Find hosts and queue work.
+host_id_end = add_work_and_find_end_host_id(host_id_start, c_args.host_id_discovery_truncation_limit)
+logger.debug('host_id_end: %s' % str(host_id_end))
+# Save configuration
+save_config()
 # Now wait for the queue to be empty, indicating that we have
 # processed all of the downloads.
-logger.info('*** Main thread waiting')
+logger.info('*** All hosts queued. Waiting for downloads to complete.')
 hosts_queue.join()
 logger.info('*** Done')
 elapsed_time = time.time() - start_time
-logger.info(elapsed_time)
-
+logger.info('Number of threads: %s' % str(c_args.threads))
+logger.info('Number of hosts downloaded per call: %s' % str(c_args.hosts_to_download_per_call))
+logger.info('Seconds elapsed: %s' % elapsed_time)
+logger.info('Number of hosts downloaded: %s' % num_hosts)
