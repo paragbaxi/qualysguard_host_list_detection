@@ -51,7 +51,6 @@ Example run
     INFO:root:Found 400 id(s), will now queue.
     INFO:root:Found 400 id(s), will now queue.
     INFO:root:Found 112 id(s), will now queue.
-    INFO:root:Found 0 id(s), will now queue.
     INFO:root:No more new hosts.
     INFO:root:*** All hosts queued. Waiting for downloads to complete.
     INFO:root:Thread 2: Downloading new hosts.
