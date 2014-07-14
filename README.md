@@ -38,7 +38,7 @@ Usage
                             Number of concurrent threads to call the host list
                             detection API with. (Default = 2)
       -v, --verbose         Outputs additional information to log.
-
+      
 Example run
 ===========
 
