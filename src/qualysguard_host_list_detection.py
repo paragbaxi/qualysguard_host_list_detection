@@ -26,14 +26,16 @@ def download_hosts(i, q):
     infinite loop, and only exit when
     the main thread ends.
     """
-    global c_args, datetime_format, PATH_DATA
+    global c_args, datetime_format, start_time_hosts_detection
     # Have thread number start at 1 for human display.
     thread_number = i + 1
     # Download assigned hosts in this thread.
     while True:
         logger.debug('Thread %s: Looking for the next enclosure' % (thread_number))
         ids = q.get()
-        # Chunk received.
+        # Chunk received. Start time.
+        if not start_time_hosts_detection:
+            start_time_hosts_detection = time.time()
         # Find start & end host ids for logging.
         if not ',' in ids:
             # Only one host_id or one range, no comma found.
@@ -56,20 +58,22 @@ def download_hosts(i, q):
         if 'CSV' in params['output_format']:
             params.update({'suppress_duplicated_data_from_csv': '1'})
         # Add user parameter options, if applicable.
-        if c_args.options:
-            user_params = ast.literal_eval(c_args.options)
+        if c_args.parameters:
+            user_params = ast.literal_eval(c_args.parameters)
             params.update(user_params)
         # Download host list detection chunk.
         response = qgc.request('/api/2.0/fo/asset/host/vm/detection/',
                            params)
-        file_extension = 'csv'
-        if c_args.format == 'XML':
-            file_extension = 'xml'
-        filename = '%s/%s-host_ids-%s.%s' % (PATH_DATA, datetime_format, ids_range, file_extension)
-        logger.debug('Writing hosts file: %s' % filename)
-        with open(filename, 'w') as host_file:
-            print(response, file = host_file)
         q.task_done()
+        # Don't write to file if benchmarking.
+        if not c_args.benchmark:
+            file_extension = 'csv'
+            if c_args.format == 'XML':
+                file_extension = 'xml'
+            filename = '%s/%s-host_ids-%s.%s' % (c_args.output_directory, datetime_format, ids_range, file_extension)
+            logger.debug('Writing hosts file: %s' % filename)
+            with open(filename, 'w') as host_file:
+                print(response, file = host_file)
         logger.debug('Thread %s: Finished downloading.: %s' % (thread_number, ids))
 
 def save_config():
@@ -191,30 +195,39 @@ def add_work_and_find_end_host_id(id_start, num_hosts_per_call):
 #
 #  Begin
 #
+# Set timers.
+start_time_hosts_detection = False
 start_time = time.time()
 # Declare the command line flags/options we want to allow.
 parser = argparse.ArgumentParser(
     description='Download hosts concurrently and efficiently via host list detection API.')
 # parser.add_argument('-a', '--override_all_apps',
 #                     help='Generate report for all webapps. Automatically selected for first run.')
+# Do not store files.
+parser.add_argument('--benchmark',
+                    action = 'store_true',
+                    help = argparse.SUPPRESS)
 parser.add_argument('--config',
                     help = 'Configuration for Qualys connector.')
-parser.add_argument('-f', '--format',
-                    default='CSV_NO_METADATA',
-                    help='Set host list detection output format (Default = CSV_NO_METADATA)')
-parser.add_argument('--host_id_discovery_truncation_limit',
-                     default=5000,
-                     help='Override default truncation limit (5000) for host ID discovery.')
-parser.add_argument('--hosts_to_download_per_call',
+parser.add_argument('-d', '--hosts_to_download_per_call',
                      default=1000,
                      help='Override default number of hosts (1000) to download per call for host vulnerability data.')
-parser.add_argument('-o', '--options',
-                    help='Set host list detection options (Default: {\'suppress_duplicated_data_from_csv\': \'1\'})\n(Example: \"{\'include_search_list_titles\': \'SSL+certificate\', \'active_kernels_only\': \'1\'}\")')
+parser.add_argument('-f', '--format',
+                    default='CSV_NO_METADATA',
+                    help='Set host list detection output format. (Default = CSV_NO_METADATA)')
+parser.add_argument('-i','--host_id_discovery_truncation_limit',
+                     default=5000,
+                     help='Override default truncation limit (5000) for host ID discovery.')
+parser.add_argument('-o', '--output_directory',
+                    default='data',
+                    help='Set directory for data output. (Default = data)')
+parser.add_argument('-p', '--parameters',
+                    help='Set host list detection parameters (Default: {\'suppress_duplicated_data_from_csv\': \'1\'})\n(Example: \"{\'include_search_list_titles\': \'SSL+certificate\', \'active_kernels_only\': \'1\'}\")')
 parser.add_argument('-t', '--threads',
                     default=2,
                     help='Number of concurrent threads to call the host list detection API with. (Default = 2)')
 parser.add_argument('-v', '--verbose',
-                    action='store_true',
+                    action = 'store_true',
                     help='Outputs additional information to log.')
 # Parse arguments.
 c_args = parser.parse_args()
@@ -223,9 +236,8 @@ c_args.hosts_to_download_per_call = int(c_args.hosts_to_download_per_call)
 PATH_LOG = 'log'
 if not os.path.exists(PATH_LOG):
     os.makedirs(PATH_LOG)
-PATH_DATA = 'data'
-if not os.path.exists(PATH_DATA):
-    os.makedirs(PATH_DATA)
+if not os.path.exists(c_args.output_directory):
+    os.makedirs(c_args.output_directory)
 # Set log options.
 datetime_format = datetime.datetime.now().strftime('%Y-%m-%d.%H-%M-%S')
 LOG_FILENAME = '%s/%s-%s.log' % (PATH_LOG,
@@ -284,6 +296,7 @@ for i in range(threads):
 # Find hosts and queue work.
 host_id_end = add_work_and_find_end_host_id(host_id_start, c_args.host_id_discovery_truncation_limit)
 logger.debug('host_id_end: %s' % str(host_id_end))
+elapsed_time_host_ids = time.time() - start_time
 # Save configuration
 save_config()
 # Now wait for the queue to be empty, indicating that we have
@@ -292,7 +305,10 @@ logger.info('*** All hosts queued. Waiting for downloads to complete.')
 hosts_queue.join()
 logger.info('*** Done')
 elapsed_time = time.time() - start_time
+elapsed_time_hosts_detection = time.time() - start_time_hosts_detection
 logger.info('Number of threads: %s' % str(c_args.threads))
 logger.info('Number of hosts downloaded per call: %s' % str(c_args.hosts_to_download_per_call))
-logger.info('Seconds elapsed: %s' % elapsed_time)
 logger.info('Number of hosts downloaded: %s' % num_hosts)
+logger.info('Seconds elapsed to download all hosts ids: %s' % elapsed_time_host_ids)
+logger.info('Seconds elapsed to download all hosts detection data: %s' % elapsed_time_hosts_detection)
+logger.info('Seconds elapsed total: %s' % elapsed_time)
